@@ -65,20 +65,11 @@ fetch_image() {
   printf '%s\n' "$latest" >"$image/image.json"
 }
 
-# Whether a downloaded package's SHA-256 is the one pacman's sync database,
-# whose signature pacman checked when it synced, lists for it.
+# Whether a downloaded package carries a good signature from a key in
+# pacman's keyring. The sync database cannot vouch for it: Omarchy's pacman
+# accepts unsigned databases (DatabaseOptional).
 verify_package() {
-  local file="$1" name db expected
-  name=$(basename -- "$file")
-  name=${name%-*.pkg.tar.zst}
-  for db in /var/lib/pacman/sync/*.db; do
-    expected=$(tar -xOf "$db" "$name/desc" 2>/dev/null | sed -n '/^%SHA256SUM%$/{n;p;q}') || true
-    if [[ -n $expected ]]; then
-      [[ $(sha256sum <"$file" | cut -d' ' -f1) == "$expected" ]]
-      return
-    fi
-  done
-  return 1
+  gpgv --keyring /etc/pacman.d/gnupg/pubring.gpg "$1.sig" "$1" >/dev/null 2>&1
 }
 
 # Arch splits QEMU's virtio display into optional packages, and the VM boots
@@ -88,22 +79,26 @@ ensure_virtio_vga() {
   local modules="$cache/qemu-modules" url
 
   qemu-system-x86_64 -device help 2>/dev/null | grep -q '"virtio-vga"' && return 0
-  if [[ ! -f $modules/hw-display-virtio-vga.so ]] || ! QEMU_MODULE_DIR=$modules qemu-system-x86_64 -device help 2>/dev/null | grep -q '"virtio-vga"'; then
+  # .verified marks modules unpacked from signature-checked packages; a cache
+  # without it is rebuilt.
+  if [[ ! -f $modules/.verified ]] || ! QEMU_MODULE_DIR=$modules qemu-system-x86_64 -device help 2>/dev/null | grep -q '"virtio-vga"'; then
     say "QEMU has no virtio-vga; unpacking qemu-hw-display-virtio-{vga,gpu} into $modules"
     rm -rf "$modules" "$modules.tmp"
     mkdir -p "$modules.tmp"
-    # QEMU loads these into its own process, so each archive must match the
-    # checksum in pacman's signed sync database before it is unpacked.
+    # QEMU loads these into its own process, so each archive's signature is
+    # checked before it is unpacked.
     for url in $(pacman -Sp qemu-hw-display-virtio-vga qemu-hw-display-virtio-gpu); do
       file=$(basename -- "$url")
       curl -fsS --retry 3 -o "$modules.tmp/$file" "$url"
+      curl -fsS --retry 3 -o "$modules.tmp/$file.sig" "$url.sig"
       if ! verify_package "$modules.tmp/$file"; then
-        say "$file does not match pacman's sync database; not using it"
+        say "$file has no good signature from pacman's keyring; not using it"
         rm -rf "$modules.tmp"
         exit 1
       fi
       tar -x --zstd -f "$modules.tmp/$file" -C "$modules.tmp" usr/lib/qemu
     done
+    touch "$modules.tmp/usr/lib/qemu/.verified"
     mv "$modules.tmp/usr/lib/qemu" "$modules"
     rm -rf "$modules.tmp"
   fi
@@ -120,10 +115,13 @@ find_pkgs() {
   local -a candidates
 
   if [[ -n ${OMARCHY_PKGS_PATH:-} ]]; then
-    # The checkout or its pkgbuilds/, as base-test.sh accepts.
-    candidate=${OMARCHY_PKGS_PATH%/}
-    [[ $(basename -- "$candidate") == "pkgbuilds" ]] && candidate=$(dirname -- "$candidate")
-    if [[ ! -d $candidate/pkgbuilds ]]; then
+    # The checkout or its pkgbuilds/, told apart by where the PKGBUILDs are,
+    # as base-test.sh does.
+    candidate=$(cd -P -- "$OMARCHY_PKGS_PATH" 2>/dev/null && pwd) || candidate=""
+    if [[ -n $candidate ]] && compgen -G "$candidate/*/PKGBUILD" >/dev/null && [[ ! -d $candidate/pkgbuilds ]]; then
+      candidate=$(dirname -- "$candidate")
+    fi
+    if [[ -z $candidate || ! -d $candidate/pkgbuilds ]]; then
       say "OMARCHY_PKGS_PATH names no omarchy-pkgs checkout: $OMARCHY_PKGS_PATH"
       exit 1
     fi
@@ -172,15 +170,18 @@ flock 9
 fetch_image
 ensure_virtio_vga
 pkgs=$(find_pkgs)
+# Hard links pin this run's image: a later run that fetches a new release
+# replaces the cache's files, not these.
+run="$cache/runs/$(date +%Y%m%d-%H%M%S)-$$"
+mkdir -p "$run/src" "$run/image"
+ln "$cache/image/"{base.qcow2,vmlinuz,initrd,cmdline} "$run/image/"
 flock -u 9
 
-run="$cache/runs/$(date +%Y%m%d-%H%M%S)-$$"
-mkdir -p "$run/src"
 copy_tree "$ROOT" "$run/src/omarchy"
 # A repository of its own, as CI's checkout has, for whatever asks git.
 git -C "$run/src/omarchy" init -q
 git -C "$run/src/omarchy" add -A
-git -C "$run/src/omarchy" -c user.name=test-vm -c user.email=test-vm@localhost -c commit.gpgsign=false commit -q --no-verify -m "test/vm snapshot"
+git -C "$run/src/omarchy" -c user.name=test-vm -c user.email=test-vm@localhost -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q --no-verify -m "test/vm snapshot"
 copy_tree "$pkgs" "$run/src/omarchy-pkgs"
 
 # Old runs' logs go after a week.
@@ -188,8 +189,8 @@ find "$cache/runs" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} + 2>/dev/nu
 
 say "running $* in a fresh VM; logs in $run/out"
 status=0
-CI_VM_COMMAND=$(printf '%q ' "$@") MEM=${MEM:-6G} "$ROOT/test/ci-vm" "$cache/image" "$run/src" "$run/out" || status=$?
-rm -rf "$run/src"
+CI_VM_COMMAND=$(printf '%q ' "$@") MEM=${MEM:-6G} "$ROOT/test/ci-vm" "$run/image" "$run/src" "$run/out" || status=$?
+rm -rf "$run/src" "$run/image"
 
 if [[ -f $run/out/run.log ]]; then
   echo "--- output ($run/out/run.log) ---"
