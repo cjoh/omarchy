@@ -124,9 +124,12 @@ fi
 # neither the commands nor the files added since.
 # The exit status goes to a file of its own, renamed into place whole: the
 # tests print lines like "rc=0" themselves, so the log cannot carry it.
-command='export OMARCHY_PATH=~/src/omarchy PATH=~/src/omarchy/bin:$PATH; cd ~/src/omarchy && date +%s.%N >~/started && ./test/all >~/run.log 2>&1; echo "$?" >~/rc.next && mv ~/rc.next ~/rc'
+# CI_VM_COMMAND picks what runs there (test/vm passes one); ./test/all by
+# default. OMARCHY_TEST_VM tells the tests they are in a disposable session,
+# so the live-desktop guard in test/live-desktop lets them drive it.
+command='export OMARCHY_PATH=~/src/omarchy PATH=~/src/omarchy/bin:$PATH; cd ~/src/omarchy && date +%s.%N >~/started && '"${CI_VM_COMMAND:-./test/all}"' >~/run.log 2>&1; echo "$?" >~/rc.next && mv ~/rc.next ~/rc'
 ssh_vm "systemd-run --user --quiet --collect --same-dir \
-  -E OMARCHY_PKGS_PATH=\$HOME/src/omarchy-pkgs bash -c $(printf %q "$command")"
+  -E OMARCHY_TEST_VM=1 -E OMARCHY_PKGS_PATH=\$HOME/src/omarchy-pkgs bash -c $(printf %q "$command")"
 last_report="" next_report=0
 until ssh_vm '[[ -s ~/rc ]]' 2>/dev/null; do
   if (( $(seconds) >= ${CI_VM_TIMEOUT:-1500} )); then
@@ -158,5 +161,5 @@ pull_shell_logs
 pull_kernel_log
 
 sed -n '/^Skipped checks in/,$p' "$out/run.log"
-# The tests' verdict is the run's verdict.
-[[ $rc == "0" ]]
+# The tests' verdict is the run's verdict, with their exit status.
+exit "$rc"

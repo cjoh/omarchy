@@ -4,10 +4,13 @@ set -euo pipefail
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
+# The scratch runners below are under test here, not handed to a VM.
+export OMARCHY_TEST_LIVE=1
+
 test_dir=$(mktemp -d)
 trap 'rm -rf "$test_dir"' EXIT
 mkdir -p "$test_dir/test/shell.d"
-cp "$ROOT/test/"{shell,all} "$test_dir/test/"
+cp "$ROOT/test/"{shell,all,live-desktop} "$test_dir/test/"
 cp "$SHELL_TEST_DIR/base-test.sh" "$test_dir/test/shell.d/"
 
 # Run the real runners in a tiny fixture tree, without recursing into this test.

@@ -3,6 +3,12 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+# On the desktop you are working at, run in a VM instead; see test/live-desktop.
+source "$ROOT/test/live-desktop"
+if on_live_desktop; then
+  run_in_vm_instead "$ROOT" ./test/all "$@"
+fi
 tests=(
   "$ROOT/test/cli"
   "$ROOT/test/shell"
