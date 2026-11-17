@@ -158,7 +158,8 @@ How to run them without wasting runs:
 - Always write the whole output to a log file and read it from there: `bash test/shell.d/<area>-test.sh >/tmp/<area>.log 2>&1`. Never pipe a test run straight through `grep`, `head` or `tail`: what they drop is gone, and getting it back costs a whole run. `./test/shell` keeps every file's log and prints the directory at the end; read a failure from its log.
 - Run a test again only after changing something it covers. Never rerun to see output, to confirm a pass, or in the hope that a failure goes away.
 - For a failure in a file you did not touch, run that one file once on the base branch (in a worktree, or with `git stash`). If it fails there too, it was already broken: report it and leave it out of this change.
-- Tests that use the live session (`require_compositor`, `shell-idle-spawn-test.sh`) read the real desktop, so the user working at it can fail them. One that fails in a full run and passes alone is session noise: say so; do not loop on it.
+- On a live desktop, `./test/all`, `./test/shell` and any file that calls `require_compositor` run in a fresh VM through `test/vm` instead of drawing on the user's screens; the first run downloads the release image once. Don't set `OMARCHY_TEST_LIVE=1` to skip the VM unless the user asks. See "Running on your own desktop" in [`docs/testing.md`](docs/testing.md).
+- In the VM nobody is at the desktop, but timing tests still read a busy machine. One that fails in a full run and passes alone is noise: say so; do not loop on it.
 
 When to add a test. A test earns its place only by catching a regression nothing else would; every one costs a maintainer to read and everyone a slower suite. Before writing one, name the breakage it would catch. If the answer is "someone edits the line I just added", don't write it.
 

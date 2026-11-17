@@ -1,0 +1,154 @@
+#!/bin/bash
+
+# Runs tests in a fresh VM of the current Omarchy release instead of on the
+# desktop you are working at, the way CI does (test/ci-vm), so scratch shells,
+# panels and screen reads never land on your monitors.
+#
+#   test/vm                                  ./test/all
+#   test/vm ./test/shell
+#   test/vm bash test/shell.d/menu-test.sh
+#
+# The command runs from the checkout root inside the VM. The checkout is
+# copied as it stands, uncommitted and untracked (not ignored) files included.
+# The release image (about 4 GB) is downloaded once and reused until a new
+# release replaces it. Each run's logs stay under the cache's runs/ directory.
+#
+# Env: OMARCHY_TEST_VM_CACHE (default ~/.cache/omarchy-test-vm, in the
+# account's home even when HOME points elsewhere),
+# OMARCHY_PKGS_PATH (an omarchy-pkgs checkout; otherwise found beside this one
+# or cloned into the cache), MEM (default 6G), SMP (default 4),
+# CI_VM_TIMEOUT (default 1500 s).
+
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+SITE=${OMARCHY_TEST_VM_SITE:-https://nightly.omarchy.org}
+# The account's own home, not $HOME: a test file that hands itself here may
+# already have pointed HOME at a scratch directory.
+home=$(getent passwd "$(id -u)" | cut -d: -f6)
+cache=${OMARCHY_TEST_VM_CACHE:-$home/.cache/omarchy-test-vm}
+mkdir -p "$cache"
+
+say() { echo "test/vm: $*" >&2; }
+
+for command in qemu-system-x86_64 qemu-img ssh ssh-keygen curl jq git; do
+  if ! command -v "$command" >/dev/null; then
+    say "needs $command (qemu-system-x86, qemu-img, openssh, curl, jq, git)"
+    exit 1
+  fi
+done
+if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+  say "needs read and write access to /dev/kvm"
+  exit 1
+fi
+
+# The release image, refreshed when a new one is published. One download at a
+# time: parallel runs wait for the first to finish it.
+fetch_image() {
+  local image="$cache/image" latest sha file
+
+  mkdir -p "$image"
+  latest=$(curl -fsS --retry 3 "$SITE/stable/latest.json")
+  sha=$(jq -r .vm.sha256 <<<"$latest")
+  if [[ -f $image/base.qcow2 && -f $image/image.json && $(jq -r .vm.sha256 "$image/image.json") == "$sha" ]]; then
+    return 0
+  fi
+
+  say "downloading the Omarchy $(jq -r .omarchy_version <<<"$latest") VM image (about $(( $(jq -r .vm.size <<<"$latest") / 1000000000 )) GB), once"
+  for file in vmlinuz initrd cmdline; do
+    curl -fsS --retry 3 -o "$image/$file.part" "$(jq -r .vm.unpacked <<<"$latest")$file"
+    mv "$image/$file.part" "$image/$file"
+  done
+  curl -fS --retry 3 --progress-bar -o "$image/base.qcow2.part" "$(jq -r .vm.url <<<"$latest")"
+  echo "$sha  $image/base.qcow2.part" | sha256sum --quiet -c -
+  mv "$image/base.qcow2.part" "$image/base.qcow2"
+  printf '%s\n' "$latest" >"$image/image.json"
+}
+
+# Arch splits QEMU's virtio display into optional packages, and the VM boots
+# with virtio-vga. Without them installed, unpack the repo's copies into the
+# cache and point QEMU at them, so no root is needed.
+ensure_virtio_vga() {
+  local modules="$cache/qemu-modules" url
+
+  qemu-system-x86_64 -device help 2>/dev/null | grep -q '"virtio-vga"' && return 0
+  if [[ ! -f $modules/hw-display-virtio-vga.so ]] || ! QEMU_MODULE_DIR=$modules qemu-system-x86_64 -device help 2>/dev/null | grep -q '"virtio-vga"'; then
+    say "QEMU has no virtio-vga; unpacking qemu-hw-display-virtio-{vga,gpu} into $modules"
+    rm -rf "$modules" "$modules.tmp"
+    mkdir -p "$modules.tmp"
+    for url in $(pacman -Sp qemu-hw-display-virtio-vga qemu-hw-display-virtio-gpu); do
+      curl -fsS --retry 3 "$url" | tar -x --zstd -C "$modules.tmp" usr/lib/qemu
+    done
+    mv "$modules.tmp/usr/lib/qemu" "$modules"
+    rm -rf "$modules.tmp"
+  fi
+  export QEMU_MODULE_DIR=$modules
+  if ! qemu-system-x86_64 -device help 2>/dev/null | grep -q '"virtio-vga"'; then
+    say "QEMU still has no virtio-vga; install qemu-hw-display-virtio-vga and qemu-hw-display-virtio-gpu"
+    exit 1
+  fi
+}
+
+# The omarchy-pkgs checkout some tests hold this repository against.
+find_pkgs() {
+  local candidate
+  local -a candidates
+
+  if [[ -n ${OMARCHY_PKGS_PATH:-} ]]; then
+    candidates=("$OMARCHY_PKGS_PATH")
+  else
+    candidates=("$ROOT/../omarchy-pkgs" "$ROOT/../omacom/omarchy-pkgs" "$home/Work/omacom/omarchy-pkgs" "$home/Work/omarchy-pkgs")
+  fi
+  for candidate in "${candidates[@]}"; do
+    if [[ -d $candidate/pkgbuilds ]]; then
+      (cd -- "$candidate" && pwd -P)
+      return 0
+    fi
+  done
+
+  # None beside this checkout: keep a clone of the upstream one in the cache.
+  if [[ -d $cache/omarchy-pkgs/.git ]]; then
+    git -C "$cache/omarchy-pkgs" fetch -q --depth 1 origin HEAD && git -C "$cache/omarchy-pkgs" reset -q --hard FETCH_HEAD
+  else
+    git clone -q --depth 1 https://github.com/omacom/omarchy-pkgs.git "$cache/omarchy-pkgs"
+  fi
+  echo "$cache/omarchy-pkgs"
+}
+
+# A checkout's files as they stand: tracked and untracked, not ignored.
+copy_tree() {
+  mkdir -p "$2"
+  git -C "$1" ls-files -z -c -o --exclude-standard |
+    (cd -- "$1" && tar --null --no-recursion -T - -cf - 2>/dev/null) |
+    tar -xf - -C "$2"
+}
+
+if (( $# == 0 )); then
+  set -- ./test/all
+fi
+
+exec 9>"$cache/lock"
+flock 9
+fetch_image
+ensure_virtio_vga
+pkgs=$(find_pkgs)
+flock -u 9
+
+run="$cache/runs/$(date +%Y%m%d-%H%M%S)-$$"
+mkdir -p "$run/src"
+copy_tree "$ROOT" "$run/src/omarchy"
+copy_tree "$pkgs" "$run/src/omarchy-pkgs"
+
+# Old runs' logs go after a week.
+find "$cache/runs" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+
+say "running $* in a fresh VM; logs in $run/out"
+status=0
+CI_VM_COMMAND=$(printf '%q ' "$@") MEM=${MEM:-6G} "$ROOT/test/ci-vm" "$cache/image" "$run/src" "$run/out" || status=$?
+rm -rf "$run/src"
+
+if [[ -f $run/out/run.log ]]; then
+  echo "--- output ($run/out/run.log) ---"
+  cat "$run/out/run.log"
+fi
+exit "$status"

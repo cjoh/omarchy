@@ -97,8 +97,16 @@ compositor_reachable() {
   return 1
 }
 
+source "$ROOT/test/live-desktop"
+
 require_compositor() {
   local description="$1"
+
+  # A file that needs the compositor would draw on the desktop you are working
+  # at; run the whole file in a VM instead. See test/live-desktop.
+  if on_live_desktop && compositor_reachable; then
+    run_in_vm_instead "$ROOT" bash "$(realpath --relative-to="$ROOT" -- "$0")"
+  fi
 
   if compositor_reachable; then
     # No probe outruns a compositor that dies mid-run, and Quickshell leaves

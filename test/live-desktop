@@ -1,0 +1,23 @@
+# Sourced by the runners and base-test.sh; not run on its own.
+#
+# The shell tests start scratch Quickshell instances, open panels and read the
+# screen. On a developer's own desktop those surfaces land on top of the real
+# ones, so for the length of a run every monitor shows a second bar,
+# background and windows inside windows. On a live desktop the runners and the
+# files that need a compositor therefore hand themselves to test/vm, which
+# runs them in a fresh VM of the current release. The CI VM sets
+# OMARCHY_TEST_VM, and OMARCHY_TEST_LIVE=1 keeps a run on the live desktop for
+# whoever wants it there.
+
+on_live_desktop() {
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} && ${OMARCHY_TEST_VM:-} != 1 && ${OMARCHY_TEST_LIVE:-} != 1 ]]
+}
+
+# Re-runs the given command in the VM and exits with its status. The command
+# is relative to the checkout root, as it runs from there in the VM.
+run_in_vm_instead() {
+  local root="$1"
+  shift
+  echo "Live desktop detected: running in a VM instead (test/vm; OMARCHY_TEST_LIVE=1 runs it here)." >&2
+  exec "$root/test/vm" "$@"
+}

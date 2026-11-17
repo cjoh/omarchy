@@ -91,6 +91,15 @@ mid-session leaves its socket behind. When the compositor is reachable,
 `qFatal()` if its connection drops mid-run, and the test should fail without
 writing a core dump as debris.
 
+## Running on your own desktop
+
+The compositor-gated files start scratch shells, open panels and read the screen. On the desktop you are working at, those surfaces land on top of your real ones: for the length of a run every monitor shows a second bar and background, and windows appear inside windows. So on a live Hyprland session the tests run in a VM instead (`test/live-desktop`):
+
+- `./test/all` and `./test/shell` hand themselves to `test/vm` before running anything.
+- A single file run directly (`bash test/shell.d/<area>-test.sh`) hands itself over when it reaches `require_compositor`; files that never call it run in place.
+- `test/vm [command]` boots a fresh VM of the current stable release through `test/ci-vm`, copies the checkout as it stands (uncommitted and untracked files included) and omarchy-pkgs in, runs the command from the checkout root, and prints its output. The image (about 4 GB) is downloaded once into `~/.cache/omarchy-test-vm` and reused until a new release replaces it; each run's logs stay under its `runs/` directory for a week. If QEMU lacks the virtio display packages, it unpacks them from the repo into the cache, so no root is needed.
+- `test/ci-vm` sets `OMARCHY_TEST_VM=1` in the VM, which turns the redirect off there. `OMARCHY_TEST_LIVE=1` turns it off on your desktop, for a run you want to watch.
+
 Gate only what needs gating — put `require_compositor` in files whose runtime
 half needs a live session, and keep static analysis of the same area in code
 that runs unconditionally before or beside it.
