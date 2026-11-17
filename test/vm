@@ -137,6 +137,10 @@ flock -u 9
 run="$cache/runs/$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$run/src"
 copy_tree "$ROOT" "$run/src/omarchy"
+# A repository of its own, as CI's checkout has, for whatever asks git.
+git -C "$run/src/omarchy" init -q
+git -C "$run/src/omarchy" add -A
+git -C "$run/src/omarchy" -c user.name=test-vm -c user.email=test-vm@localhost commit -q -m "test/vm snapshot"
 copy_tree "$pkgs" "$run/src/omarchy-pkgs"
 
 # Old runs' logs go after a week.
