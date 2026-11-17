@@ -65,6 +65,22 @@ fetch_image() {
   printf '%s\n' "$latest" >"$image/image.json"
 }
 
+# Whether a downloaded package's SHA-256 is the one pacman's sync database,
+# whose signature pacman checked when it synced, lists for it.
+verify_package() {
+  local file="$1" name db expected
+  name=$(basename -- "$file")
+  name=${name%-*.pkg.tar.zst}
+  for db in /var/lib/pacman/sync/*.db; do
+    expected=$(tar -xOf "$db" "$name/desc" 2>/dev/null | sed -n '/^%SHA256SUM%$/{n;p;q}') || true
+    if [[ -n $expected ]]; then
+      [[ $(sha256sum <"$file" | cut -d' ' -f1) == "$expected" ]]
+      return
+    fi
+  done
+  return 1
+}
+
 # Arch splits QEMU's virtio display into optional packages, and the VM boots
 # with virtio-vga. Without them installed, unpack the repo's copies into the
 # cache and point QEMU at them, so no root is needed.
@@ -76,8 +92,17 @@ ensure_virtio_vga() {
     say "QEMU has no virtio-vga; unpacking qemu-hw-display-virtio-{vga,gpu} into $modules"
     rm -rf "$modules" "$modules.tmp"
     mkdir -p "$modules.tmp"
+    # QEMU loads these into its own process, so each archive must match the
+    # checksum in pacman's signed sync database before it is unpacked.
     for url in $(pacman -Sp qemu-hw-display-virtio-vga qemu-hw-display-virtio-gpu); do
-      curl -fsS --retry 3 "$url" | tar -x --zstd -C "$modules.tmp" usr/lib/qemu
+      file=$(basename -- "$url")
+      curl -fsS --retry 3 -o "$modules.tmp/$file" "$url"
+      if ! verify_package "$modules.tmp/$file"; then
+        say "$file does not match pacman's sync database; not using it"
+        rm -rf "$modules.tmp"
+        exit 1
+      fi
+      tar -x --zstd -f "$modules.tmp/$file" -C "$modules.tmp" usr/lib/qemu
     done
     mv "$modules.tmp/usr/lib/qemu" "$modules"
     rm -rf "$modules.tmp"
@@ -95,7 +120,14 @@ find_pkgs() {
   local -a candidates
 
   if [[ -n ${OMARCHY_PKGS_PATH:-} ]]; then
-    candidates=("$OMARCHY_PKGS_PATH")
+    # The checkout or its pkgbuilds/, as base-test.sh accepts.
+    candidate=${OMARCHY_PKGS_PATH%/}
+    [[ $(basename -- "$candidate") == "pkgbuilds" ]] && candidate=$(dirname -- "$candidate")
+    if [[ ! -d $candidate/pkgbuilds ]]; then
+      say "OMARCHY_PKGS_PATH names no omarchy-pkgs checkout: $OMARCHY_PKGS_PATH"
+      exit 1
+    fi
+    candidates=("$candidate")
   else
     candidates=("$ROOT/../omarchy-pkgs" "$ROOT/../omacom/omarchy-pkgs" "$home/Work/omacom/omarchy-pkgs" "$home/Work/omarchy-pkgs")
   fi
@@ -118,9 +150,17 @@ find_pkgs() {
 # A checkout's files as they stand: tracked and untracked, not ignored.
 copy_tree() {
   mkdir -p "$2"
-  git -C "$1" ls-files -z -c -o --exclude-standard |
-    (cd -- "$1" && tar --null --no-recursion -T - -cf - 2>/dev/null) |
-    tar -xf - -C "$2"
+  # A tracked file deleted in the working tree is still listed; leave it out.
+  (
+    cd -- "$1"
+    git ls-files -z -c -o --exclude-standard --deduplicate |
+      while IFS= read -r -d '' path; do
+        if [[ -e $path || -L $path ]]; then
+          printf '%s\0' "$path"
+        fi
+      done |
+      tar --null --no-recursion -T - -cf -
+  ) | tar -xf - -C "$2"
 }
 
 if (( $# == 0 )); then
@@ -140,7 +180,7 @@ copy_tree "$ROOT" "$run/src/omarchy"
 # A repository of its own, as CI's checkout has, for whatever asks git.
 git -C "$run/src/omarchy" init -q
 git -C "$run/src/omarchy" add -A
-git -C "$run/src/omarchy" -c user.name=test-vm -c user.email=test-vm@localhost commit -q -m "test/vm snapshot"
+git -C "$run/src/omarchy" -c user.name=test-vm -c user.email=test-vm@localhost -c commit.gpgsign=false commit -q --no-verify -m "test/vm snapshot"
 copy_tree "$pkgs" "$run/src/omarchy-pkgs"
 
 # Old runs' logs go after a week.

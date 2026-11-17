@@ -102,13 +102,12 @@ source "$ROOT/test/live-desktop"
 require_compositor() {
   local description="$1"
 
-  # A file that needs the compositor would draw on the desktop you are working
-  # at; run the whole file in a VM instead. See test/live-desktop.
-  if on_live_desktop && compositor_reachable; then
-    run_in_vm_instead "$ROOT" bash "$(realpath --relative-to="$ROOT" -- "$0")"
-  fi
-
   if compositor_reachable; then
+    # A file that needs the compositor would draw on the desktop you are
+    # working at; run the whole file in a VM instead. See test/live-desktop.
+    if on_live_desktop; then
+      run_in_vm_instead "$ROOT" bash "$(realpath --relative-to="$ROOT" -- "$0")"
+    fi
     # No probe outruns a compositor that dies mid-run, and Quickshell leaves
     # through qFatal() when its connection drops. Keep that abort from writing a
     # core; the test still fails, just without the debris.

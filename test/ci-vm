@@ -161,5 +161,5 @@ pull_shell_logs
 pull_kernel_log
 
 sed -n '/^Skipped checks in/,$p' "$out/run.log"
-# The tests' verdict is the run's verdict.
-[[ $rc == "0" ]]
+# The tests' verdict is the run's verdict, with their exit status.
+exit "$rc"
