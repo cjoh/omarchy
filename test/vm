@@ -65,11 +65,17 @@ fetch_image() {
   printf '%s\n' "$latest" >"$image/image.json"
 }
 
-# Whether a downloaded package carries a good signature from a key in
-# pacman's keyring. The sync database cannot vouch for it: Omarchy's pacman
-# accepts unsigned databases (DatabaseOptional).
+# Whether a downloaded package carries a good signature from a key pacman
+# trusts to sign packages: its keyring and trust database, read from a scratch
+# copy since the originals are root's. The sync database cannot vouch for it:
+# Omarchy's pacman accepts unsigned databases (DatabaseOptional).
 verify_package() {
-  gpgv --keyring /etc/pacman.d/gnupg/pubring.gpg "$1.sig" "$1" >/dev/null 2>&1
+  local gnupg status
+  gnupg=$(mktemp -d)
+  cp /etc/pacman.d/gnupg/pubring.gpg /etc/pacman.d/gnupg/trustdb.gpg "$gnupg/"
+  status=$(gpg --homedir "$gnupg" --batch --no-auto-key-retrieve --status-fd 1 --verify "$1.sig" "$1" 2>/dev/null) || true
+  rm -rf "$gnupg"
+  grep -q '^\[GNUPG:\] VALIDSIG ' <<<"$status" && grep -qE '^\[GNUPG:\] TRUST_(FULLY|ULTIMATE)' <<<"$status"
 }
 
 # Arch splits QEMU's virtio display into optional packages, and the VM boots
@@ -109,6 +115,13 @@ ensure_virtio_vga() {
   fi
 }
 
+# Whether a directory holds */PKGBUILD; its own path stays literal.
+has_pkgbuilds() {
+  local -a found
+  found=("$1"/*/PKGBUILD)
+  [[ -f ${found[0]} ]]
+}
+
 # The omarchy-pkgs checkout some tests hold this repository against.
 find_pkgs() {
   local candidate
@@ -118,7 +131,7 @@ find_pkgs() {
     # The checkout or its pkgbuilds/, told apart by where the PKGBUILDs are,
     # as base-test.sh does.
     candidate=$(cd -P -- "$OMARCHY_PKGS_PATH" 2>/dev/null && pwd) || candidate=""
-    if [[ -n $candidate ]] && compgen -G "$candidate/*/PKGBUILD" >/dev/null && [[ ! -d $candidate/pkgbuilds ]]; then
+    if [[ -n $candidate ]] && has_pkgbuilds "$candidate" && [[ ! -d $candidate/pkgbuilds ]]; then
       candidate=$(dirname -- "$candidate")
     fi
     if [[ -z $candidate || ! -d $candidate/pkgbuilds ]]; then
@@ -180,7 +193,7 @@ flock -u 9
 copy_tree "$ROOT" "$run/src/omarchy"
 # A repository of its own, as CI's checkout has, for whatever asks git.
 git -C "$run/src/omarchy" init -q
-git -C "$run/src/omarchy" add -A
+git -C "$run/src/omarchy" -c core.hooksPath=/dev/null add -A
 git -C "$run/src/omarchy" -c user.name=test-vm -c user.email=test-vm@localhost -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q --no-verify -m "test/vm snapshot"
 copy_tree "$pkgs" "$run/src/omarchy-pkgs"
 

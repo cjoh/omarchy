@@ -9,8 +9,11 @@
 # OMARCHY_TEST_VM, and OMARCHY_TEST_LIVE=1 keeps a run on the live desktop for
 # whoever wants it there.
 
+# test/vm boots the x86 release image under KVM, so only x86 hosts hand over;
+# elsewhere the tests run on the desktop as before.
 on_live_desktop() {
-  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} && ${OMARCHY_TEST_VM:-} != 1 && ${OMARCHY_TEST_LIVE:-} != 1 ]]
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} && ${OMARCHY_TEST_VM:-} != 1 && ${OMARCHY_TEST_LIVE:-} != 1 ]] &&
+    "$ROOT/bin/omarchy-hw-x86"
 }
 
 # Re-runs the given command in the VM and exits with its status. The command
